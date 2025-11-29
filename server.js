@@ -33,6 +33,7 @@ function calculateWeightedRating(role, bat, bowl, field) {
     if (role === "Batsman" || role === "WK") rating = (b * 0.75) + (f * 0.20) + (bo * 0.05);
     else if (role === "Bowler") rating = (bo * 0.75) + (f * 0.20) + (b * 0.05);
     else if (role === "All-Rounder") rating = (b * 0.40) + (bo * 0.40) + (f * 0.20);
+    else if (role === "Wicketkeeper") rating = (b* 0.40 ) + (f* 0.60);
     else rating = (b + bo + f) / 3;
     
     return Math.round(rating);
