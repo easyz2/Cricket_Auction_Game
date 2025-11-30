@@ -18,7 +18,7 @@ const rooms = {};
 
 // --- RULES ---
 const MAX_SQUAD_SIZE = 25;       
-const MIN_SQUAD_TO_PLAY = 18;    
+const MIN_SQUAD_TO_PLAY = 18;    // UPDATED: Min 18 players required
 const PLAYING_11_SIZE = 11;      
 const MAX_OVERSEAS_SQUAD = 8;
 const MAX_OVERSEAS_P11 = 4;
@@ -33,18 +33,18 @@ function calculateWeightedRating(role, bat, bowl, field) {
     if (role === "Batsman" || role === "WK") rating = (b * 0.75) + (f * 0.20) + (bo * 0.05);
     else if (role === "Bowler") rating = (bo * 0.75) + (f * 0.20) + (b * 0.05);
     else if (role === "All-Rounder") rating = (b * 0.40) + (bo * 0.40) + (f * 0.20);
-    else if (role === "Wicketkeeper") rating = (b* 0.40 ) + (f* 0.60);
-    else rating = (b + bo + f) / 3;
-    
+    else if (role === "Wicketkeeper") rating = (b * 0.50) + (f * 0.50);
+    else rating = (b + bo + f) / 3; 
     return Math.round(rating);
 }
 
-// --- LOAD DATABASE ---
+// --- LOAD DATABASE (PURE JSON) ---
 function loadPlayerDatabase() {
   try {
     const rawData = fs.readFileSync(path.join(__dirname, "players.json"), "utf-8");
     const players = JSON.parse(rawData);
     
+    // Validate and Calculate Ratings
     return players.map(p => {
         const weightedRating = calculateWeightedRating(p.role, p.bat, p.bowl, p.field);
         return {
@@ -71,30 +71,12 @@ function shuffleArray(array) {
     return array;
 }
 
-// --- PHASED POOL CREATOR (1-50, 51-100 logic) ---
-function createPhasedPool(allPlayers) {
-    // 1. Sort by ID first to ensure proper batches
-    allPlayers.sort((a, b) => parseInt(a.id) - parseInt(b.id));
-    
-    let phasedPool = [];
-    const BATCH_SIZE = 50;
-
-    for (let i = 0; i < allPlayers.length; i += BATCH_SIZE) {
-        // Extract a batch (e.g., 0-50, 50-100)
-        let batch = allPlayers.slice(i, i + BATCH_SIZE);
-        // Shuffle ONLY this batch
-        let shuffledBatch = shuffleArray(batch);
-        // Add shuffled batch to final pool
-        phasedPool.push(...shuffledBatch);
-    }
-    return phasedPool;
-}
-
 // --- GLOBAL GAME LOGIC ---
 
 function checkEliminations(room) {
     if(!room || !room.teams) return;
     Object.values(room.teams).forEach(team => {
+        // Eliminated if purse is 0 (or less) AND they haven't reached the minimum squad size yet
         if (team.purse <= 0 && team.squad.length < MIN_SQUAD_TO_PLAY) {
             team.isEliminated = true;
         }
@@ -113,7 +95,7 @@ function checkAuctionCompletion(roomId) {
     if (!room) return;
     const teams = Object.values(room.teams);
     
-    // Active bidders are those not eliminated, not finished, and have space
+    // Active bidders are those not eliminated, not finished, and have space in squad
     const activeBidders = teams.filter(t => !t.isEliminated && !t.isFinishedBidding && t.squad.length < MAX_SQUAD_SIZE);
     
     if (activeBidders.length === 0) {
@@ -147,14 +129,8 @@ function removePlayerFromRoom(socketId, roomId) {
 
     if (room.hostId === socketId) {
         const remainingIds = Object.keys(room.teams);
-        if (remainingIds.length > 0) {
-            room.hostId = remainingIds[0];
-        } else { 
-            // STOP TIMER BEFORE DELETING ROOM
-            if (room.auction && room.auction.timer) clearInterval(room.auction.timer);
-            delete rooms[roomId]; 
-            return; 
-        }
+        if (remainingIds.length > 0) room.hostId = remainingIds[0];
+        else { delete rooms[roomId]; return; }
     }
 
     io.to(roomId).emit("teams-updated", Object.values(room.teams));
@@ -178,8 +154,7 @@ io.on("connection", (socket) => {
     if(initialPool.length === 0) {
         initialPool = [{ id: "0", name: "Error: No Players", role: "N/A", bat:0, bowl:0, field:0, rating:0, basePrice:0, country:"India", status:"Uncapped", img:"" }];
     } else {
-        // USE PHASED POOL (Batches of 50)
-        initialPool = createPhasedPool(initialPool);
+        initialPool = shuffleArray(initialPool);
     }
 
     rooms[roomId] = {
@@ -246,6 +221,7 @@ io.on("connection", (socket) => {
       const room = rooms[roomId];
       if(!room) return;
       const team = room.teams[socket.id];
+      // Updated Check: Must have at least MIN_SQUAD_TO_PLAY (18)
       if(team && team.squad.length >= MIN_SQUAD_TO_PLAY) {
           team.isFinishedBidding = true;
           io.to(roomId).emit("teams-updated", Object.values(room.teams));
@@ -326,14 +302,17 @@ io.on("connection", (socket) => {
     if (!room || !room.auction.biddingOpen) return;
     const auction = room.auction;
 
+    // Add user to skip list if not already there
     if (!auction.skippedBy.includes(socket.id)) auction.skippedBy.push(socket.id);
 
+    // Calculate how many active bidders are left in the room
     const teams = Object.values(room.teams);
     const activeBidders = teams.filter(t => !t.isEliminated && !t.isFinishedBidding && t.squad.length < MAX_SQUAD_SIZE);
     
-    // If there is a current bidder, they don't count towards required skips
+    // If there is a current bidder, they can't skip, so we don't count them
     const requiredSkips = auction.currentBidderId ? (activeBidders.length - 1) : activeBidders.length;
 
+    // If enough people skipped, end the round
     if (auction.skippedBy.length >= requiredSkips) {
         clearInterval(auction.timer);
         if (auction.currentBidderId) finishBidding(roomId);
@@ -343,7 +322,7 @@ io.on("connection", (socket) => {
 
   function finishBidding(roomId) {
     const room = rooms[roomId];
-    if (!room) return; // SAFETY CHECK
+    if (!room) return; // <--- ADD THIS SAFETY CHECK
 
     const auction = room.auction;
     auction.biddingOpen = false;
@@ -363,7 +342,7 @@ io.on("connection", (socket) => {
   
   function finishPlayerUnsold(roomId) {
     const room = rooms[roomId];
-    if (!room) return; // SAFETY CHECK
+    if (!room) return; // <--- ADD THIS SAFETY CHECK
 
     room.auction.biddingOpen = false;
     const player = room.auction.playerPool[room.auction.currentPlayerIndex];
@@ -384,6 +363,7 @@ io.on("connection", (socket) => {
       const room = rooms[roomId];
       if(!room) return;
       const team = room.teams[socket.id];
+      // Validation: Playing 11 should be 11, or squad size if less than 11 (though min squad is 18 now)
       const requiredSelection = Math.min(PLAYING_11_SIZE, team.squad.length);
       
       if(!team || playerIds.length !== requiredSelection) return;
@@ -392,14 +372,21 @@ io.on("connection", (socket) => {
 
       const selectedPlayers = team.squad.filter(p => playerIds.includes(p.id));
       const overseasCount = selectedPlayers.filter(p => p.country === "Overseas").length;
-      if (overseasCount > MAX_OVERSEAS_P11) return;
+      if (overseasCount > MAX_OVERSEAS_P11) return; // Validation
 
+      // --- UPDATED RATING LOGIC ---
       const getEffectiveRating = (p) => {
           const factor = p.soldPrice / p.basePrice;
           let finalRating = p.rating;
-          if (factor > 6) finalRating = p.rating - 5;
-          else if (factor < 2) finalRating = p.rating + 5;
-          return Math.max(0, finalRating);
+
+          if (factor >= 7) {
+              finalRating = p.rating - 5; // Penalty for overpurchasing
+          } else if (factor < 2) {
+              finalRating = p.rating + 5; // Reward for good deal
+          } else if (factor == 2 ) {finalRating = p.rating}
+          // Else: Rating stays the same
+
+          return Math.max(0, finalRating); // Ensure rating doesn't go negative
       };
 
       const captain = team.squad.find(p => p.id === cId);
@@ -408,9 +395,10 @@ io.on("connection", (socket) => {
       const vcEffRating = getEffectiveRating(viceCaptain);
 
       let score = 0;
-      score += (cEffRating * 2);
-      score += (vcEffRating * 1.5);
+      score += (cEffRating * 2);      // Captain 2x
+      score += (vcEffRating * 1.5);   // VC 1.5x
       
+      // Leadership bonus applied to others
       const leadershipBonus = (cEffRating * 0.10) + (vcEffRating * 0.05);
       
       playerIds.forEach(pid => {
